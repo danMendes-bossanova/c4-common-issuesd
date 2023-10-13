@@ -328,6 +328,7 @@ for (uint i; i < len; ++i) {
 ### Impact of Gas Optimizations
 
 - [ **Optimization** | **Gas Savings** ]
+
 |---|---|---|
 | G001 - Don't Initialize Variables with Default Value | 1-3 gas per variable |
 | G002 - Cache Array Length Outside of Loop | 1-2 gas per loop iteration |
@@ -341,5 +342,4 @@ for (uint i; i < len; ++i) {
 | G010 - Make Function payable | 1-2 gas per function call |
 | G011 - Unnecessary checked arithmetic in for loop | 1-2 gas per loop iteration |
 | G012 - Use Prefix Increment instead of Postfix Increment if possible | 1 gas per loop iteration |
-
-Please note that these are just estimates, and the actual gas savings will vary depending on the specific contract and the Ethereum network conditions.
+|---|---|---|
