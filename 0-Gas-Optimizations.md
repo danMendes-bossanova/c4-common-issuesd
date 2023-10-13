@@ -327,19 +327,17 @@ for (uint i; i < len; ++i) {
 
 ### Impact of Gas Optimizations
 
-- [ **Optimization** | **Gas Savings** ]
-
-|---|---|---|
-| G001 - Don't Initialize Variables with Default Value | 1-3 gas per variable |
-| G002 - Cache Array Length Outside of Loop | 1-2 gas per loop iteration |
-| G003 - Use != 0 instead of > 0 for Unsigned Integer Comparison | 1-2 gas per comparison |
-| G004 - Remove Unused Variables | 1-2 gas per variable |
-| G005 - Make Variable constant/immutable | 1-2 gas per variable |
-| G006 - Use immutable for OpenZeppelin AccessControl's Roles Declarations | 1-2 gas per role declaration |
-| G007 - Shorten Revert Strings to Fit in 32 Bytes | 1-2 gas per revert |
-| G008 - Use Shift Right/Left instead of Division/Multiplication if possible | 1-2 gas per operation |
-| G009 - Make Function external instead of public | 1-2 gas per function call |
-| G010 - Make Function payable | 1-2 gas per function call |
-| G011 - Unnecessary checked arithmetic in for loop | 1-2 gas per loop iteration |
-| G012 - Use Prefix Increment instead of Postfix Increment if possible | 1 gas per loop iteration |
-|---|---|---|
+| Optimization | Gas Savings |
+|---|---|
+| **G001 - Don't Initialize Variables with Default Value** | 1-3 gas per variable |
+| **G002 - Cache Array Length Outside of Loop** | 1-2 gas per loop iteration |
+| **G003 - Use != 0 instead of > 0 for Unsigned Integer Comparison** | 1-2 gas per comparison |
+| **G004 - Remove Unused Variables** | 1-2 gas per variable |
+| **G005 - Make Variable constant/immutable** | 1-2 gas per variable |
+| **G006 - Use immutable for OpenZeppelin AccessControl's Roles Declarations** | 1-2 gas per role declaration |
+| **G007 - Shorten Revert Strings to Fit in 32 Bytes** | 1-2 gas per revert |
+| **G008 - Use Shift Right/Left instead of Division/Multiplication if possible** | 1-2 gas per operation |
+| **G009 - Make Function external instead of public** | 1-2 gas per function call |
+| **G010 - Make Function payable** | 1-2 gas per function call |
+| **G011 - Unnecessary checked arithmetic in for loop** | 1-2 gas per loop iteration |
+| **G012 - Use Prefix Increment instead of Postfix Increment if possible** | 1 gas per loop iteration |
