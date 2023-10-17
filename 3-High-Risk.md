@@ -4,8 +4,10 @@
 
 ### Description
 
-ERC20 operations can be unsafe due to different implementations and
-vulnerabilities in the standard.
+
+ERC20 operations can present security challenges due to variations 
+in their implementations and potential vulnerabilities within the standard. 
+For a tech-savvy audience, it's essential to address these concerns.
 
 It is therefore recommended to always either use OpenZeppelin's `SafeERC20`
 library or at least to wrap each operation in a `require` statement.
@@ -148,3 +150,39 @@ function claimRepayedAmount() external {
 }
 ```
 
+
+## H005 - Setting new controller can break YVaultLPFarming
+
+### Description
+
+The accruals in yVaultLPFarming will fail if currentBalance < previousBalance in _computeUpdate.
+
+### POC
+
+🤦 Bad:
+```solidity
+ currentBalance = vault.balanceOfJPEG() + jpeg.balanceOf(address(this));
+uint256 newRewards = currentBalance - previousBalance;
+```
+
+No funds can be withdrawn anymore as the withdraw functions first trigger an _update.
+
+The currentBalance < previousBalance case can, for example, be triggerd by decreasing the vault.balanceOfJPEG() due to calling yVault.setController:
+
+🚀 @audit:
+```solidity
+function setController(address _controller) public onlyOwner {
+    // @audit can reduce balanceofJpeg which breaks other masterchef contract
+    require(_controller != address(0), "INVALID_CONTROLLER");
+    controller = IController(_controller);
+}
+
+function balanceOfJPEG() external view returns (uint256) {
+    // @audit new controller could return a smaller balance
+    return controller.balanceOfJPEG(address(token));
+}
+```
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-04-jpegd-findings/issues/80)
