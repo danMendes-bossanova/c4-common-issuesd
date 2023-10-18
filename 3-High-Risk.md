@@ -339,3 +339,372 @@ Insert this test into yVault.ts.
 ### Background Information
 
 - [Chemical - w2](https://github.com/code-423n4/2022-04-jpegd-findings/issues/12)
+
+## H008 - Reentrancy issue in yVault.deposit
+
+### Vulnerability details
+**Impact**
+
+In deposit, the balance is cached and then a token.transferFrom is triggered which can lead to exploits if the token is a token that gives control to the sender, like ERC777 tokens.
+
+### Proof of Concept
+
+Initial state: balance() = 1000, shares supply = 1000.
+Depositing 1000 amount should mint 1000 supply, but one can split the 1000 amounts into two 500 deposits and use re-entrancy to profit.
+
+ - Outer deposit(500): balanceBefore = 1000. Control is given to attacker ...
+ - Inner deposit(500): balanceBefore = 1000. shares = (_amount * supply) / balanceBefore = 500 * 1000 / 1000 = 500 shares are minted ...
+ - Withdrawing the 500 + 750 = 1250 shares via withdraw(1250), the attacker receives backingTokens = (balance() * _shares) / supply = 2000 * 1250 / 2250 = 1111.111111111. The attacker makes a profit of 1111 - 1000 = 111 tokens.
+ - They repeat the attack until the vault is drained.
+
+### Recommended Mitigation Steps
+
+The safeTransferFrom should be the last call in deposit.
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-04-jpegd-findings/issues/81)
+
+## H009 - Setting new controller can break YVaultLPFarming
+
+### Vulnerability details
+**Impact**
+
+The accruals in yVaultLPFarming will fail if currentBalance < previousBalance in _computeUpdate.
+
+```solidity
+currentBalance = vault.balanceOfJPEG() + jpeg.balanceOf(address(this));
+uint256 newRewards = currentBalance - previousBalance;
+```
+
+No funds can be withdrawn anymore as the withdraw functions first trigger an _update.
+
+The currentBalance < previousBalance case can, for example, be triggerd by decreasing the vault.balanceOfJPEG() due to calling yVault.setController:
+
+```solidity
+function setController(address _controller) public onlyOwner {
+    // @audit can reduce balanceofJpeg which breaks other masterchef contract
+    require(_controller != address(0), "INVALID_CONTROLLER");
+    controller = IController(_controller);
+}
+
+function balanceOfJPEG() external view returns (uint256) {
+    // @audit new controller could return a smaller balance
+    return controller.balanceOfJPEG(address(token));
+}
+```
+
+### Recommended Mitigation Steps
+
+Setting a new controller on a vault must be done very carefully and requires a migration.
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-04-jpegd-findings/issues/80)
+
+## H010 - Can force borrower to pay huge interest
+
+### Vulnerability details
+**Impact**
+
+The loan amount is used as a min loan amount. It can be matched as high as possible (realistically up to the collateral NFT's worth to remain in profit) and the borrower has to pay interest on the entire amount instead of just on the desired loan amount when the loan was created.
+
+### Proof of Concept
+
+ - User needs a 10k USDC loan, NFTs are illiquid and they only have a BAYC worth 350k$. So buying another NFT worth roughly the desired 10k$ is not feasible. They will put the entire 350k$ BAYC as collateral for the 10k USDC loan.
+ - A lender matches the loan calling lend with 350k USDC.
+ - The borrower now has to pay interest on the entire 350k USDC even though they only wanted a 10k loan. Otherwise, they risk losing their collateral. Their effective rate on their 10k loan is 35x higher.
+
+### Recommended Mitigation Steps
+
+The loan amount should not have min amount semantics.
+When someone wants to get a loan, they specify a certain amount they need, they don't want to receive and pay interest on more than that.
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-04-backed-findings/issues/24)
+
+## H011 - Oracle price does not compound
+
+### Vulnerability details
+**Impact**
+
+The oracle does not correctly compound the monthly APRs - it resets on fulfill.
+Note that the oraclePrice storage variable is only set in _updateCPIData as part of the oracle fulfill callback.
+It's set to the old price (price from 1 month ago) plus the interpolation from startTime to now.
+However, startTime is reset in requestCPIData due to the afterTimeInit modifier, and therefore when Chainlink calls fulfill in response to the CPI request, the timeDelta = block.timestamp - startTime is close to zero again and oraclePrice is updated to itself again.
+
+This breaks the core functionality of the protocol as the oracle does not track the CPI, it always resets to 1.0 after every fulfill instead of compounding it.
+In addition, there should also be a way for an attacker to profit from the sudden drop of the oracle price to 1.0 again.
+
+
+### Proof of Concept
+
+As an example, assume oraclePrice = 1.0 (1e18), monthlyAPR = 10%. The time elapsed is 14 days. Calling getCurrentOraclePrice() now would return 1.0 + 14/28 * 10% = 1.05.
+
+ - it's now the 15th of the month and one can trigger requestCPIData. This resets startTime = now.
+ - Calling getCurrentOraclePrice() now would return 1.0 again as timeDelta (and priceDelta) is zero: oraclePriceInt + priceDelta = oraclePriceInt = 1.0.
+ - When fulfill is called it sets oraclePrice = getCurrentOraclePrice() which will be close to 1.0 as the timeDelta is tiny.
+
+### Recommended Mitigation Steps
+
+The oraclePrice should be updated in requestCPIData() not in fulfill.
+Cover this scenario of multi-month accumulation in tests.
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-03-volt-findings/issues/22)
+
+## H012 - Withdrawal delay can be circumvented
+
+### Vulnerability details
+**Impact**
+
+After initiating a withdrawal with initiateWithdrawal, it's still possible to transfer the collateral tokens.
+This can be used to create a second account, transfer the accounts to them and initiate withdrawals at a different time frame such that one of the accounts is always in a valid withdrawal window, no matter what time it is.
+If the token owner now wants to withdraw they just transfer the funds to the account that is currently in a valid withdrawal window.
+
+Also, note that each account can withdraw the specified amount. Creating several accounts and circling & initiating withdrawals with all of them allows withdrawing larger amounts even at the same block as they are purchased in the future.
+
+I consider this high severity because it breaks core functionality of the Collateral token.
+
+### Proof of Concept
+
+For example, assume the _delayedWithdrawalExpiry = 20 blocks. Account A owns 1000 collateral tokens, they create a second account B.
+
+ - At block=0, A calls initiateWithdrawal(1000). They send their balance to account B.
+ - At block=10, B calls initiateWithdrawal(1000). They send their balance to account A.
+ - They repeat these steps, alternating the withdrawal initiation every 10 blocks.
+ - One of the accounts is always in a valid withdrawal window (initiationBlock < block && block <= initiationBlock + 20). They can withdraw their funds at any time.
+
+Insert this test into yVault.ts.
+
+🚀 @audit:
+```solidity
+ it.only("will cause 0 share issuance", async () => {
+  // mint 10k + 1 wei tokens to user1
+  // mint 10k tokens to owner
+  let depositAmount = units(10_000);
+  await token.mint(user1.address, depositAmount.add(1));
+  await token.mint(owner.address, depositAmount);
+  // token approval to yVault
+  await token.connect(user1).approve(yVault.address, 1);
+  await token.connect(owner).approve(yVault.address, depositAmount);
+  
+  // 1. user1 mints 1 wei = 1 share
+  await yVault.connect(user1).deposit(1);
+  
+  // 2. do huge transfer of 10k to strategy
+  // to greatly inflate share price (1 share = 10k + 1 wei)
+  await token.connect(user1).transfer(strategy.address, depositAmount);
+  
+  // 3. owner deposits 10k
+  await yVault.connect(owner).deposit(depositAmount);
+  // receives 0 shares in return
+  expect(await yVault.balanceOf(owner.address)).to.equal(0);
+
+  // user1 withdraws both his and owner's deposits
+  // total amt: 20k + 1 wei
+  await expect(() => yVault.connect(user1).withdrawAll())
+    .to.changeTokenBalance(token, user1, depositAmount.mul(2).add(1));
+});
+```
+
+### Recommended Mitigation Steps
+
+If there's a withdrawal request for the token owner (_accountToWithdrawalRequest[owner].blockNumber > 0), disable their transfers for the time.
+
+```solidity
+// pseudo-code not tested
+beforeTransfer(from, to, amount) {
+  super();
+  uint256 withdrawalStart =  _accountToWithdrawalRequest[from].blockNumber;
+  if(withdrawalStart > 0 && withdrawalStart + _delayedWithdrawalExpiry < block.number) {
+    revert(); // still in withdrawal window
+  }
+}
+```
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-03-prepo-findings/issues/54)
+
+
+## H013 - First depositor can break minting of shares
+
+### Vulnerability details
+**Impact**
+
+The attack vector and impact is the same as TOB-YEARN-003, where users may not receive shares in exchange for their deposits if the total asset amount has been manipulated through a large “donation”.
+
+### Proof of Concept
+
+ - Attacker deposits 2 wei (so that it is greater than min fee) to mint 1 share
+ - Attacker transfers exorbitant amount to _strategyController to greatly inflate the share’s price. Note that the _strategyController deposits its entire balance to the strategy when its deposit() function is called.
+ - They repeat these steps, alternating the withdrawal initiation every 10 blocks.
+ - Subsequent depositors instead have to deposit an equivalent sum to avoid minting 0 shares. Otherwise, their deposits accrue to the attacker who holds the only share.
+
+Insert this test into yVault.ts.
+
+🚀 @audit:
+```solidity
+ it("will cause 0 share issuance", async () => {
+	// 1. first user deposits 2 wei because 1 wei will be deducted for fee
+	let firstDepositAmount = ethers.BigNumber.from(2)
+	await transferAndApproveForDeposit(
+	    user,
+	    collateral.address,
+	    firstDepositAmount
+	)
+	
+	await collateral
+	    .connect(user)
+	    .deposit(firstDepositAmount)
+	
+	// 2. do huge transfer of 1M to strategy to controller
+	// to greatly inflate share price
+	await baseToken.transfer(strategyController.address, ethers.utils.parseEther("1000000"));
+	
+	// 3. deployer tries to deposit reasonable amount of 10_000
+	let subsequentDepositAmount = ethers.utils.parseEther("10000");
+	await transferAndApproveForDeposit(
+	    deployer,
+	    collateral.address,
+	    subsequentDepositAmount
+	)
+
+	await collateral
+	    .connect(deployer)
+	    .deposit(subsequentDepositAmount)
+	
+	// receives 0 shares in return
+	expect(await collateral.balanceOf(deployer.address)).to.be.eq(0)
+});
+```
+
+### Recommended Mitigation Steps
+
+    - Uniswap V2 solved this problem by sending the first 1000 LP tokens to the zero address. The same can be done in this case i.e. when totalSupply() == 0, send the first min liquidity LP tokens to the zero address to enable share dilution.
+    - Ensure the number of shares to be minted is non-zero: require(_shares != 0, "zero shares minted");
+    - Create a periphery contract that contains a wrapper function that atomically calls initialize() and deposit()
+    - Call deposit() once in initialize() to achieve the same effect as the suggestion above.
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-03-prepo-findings/issues/27)
+
+## H014 - Can deposit native token for free and steal funds
+
+### Vulnerability details
+**Impact**
+
+The depositErc20 function allows setting tokenAddress = NATIVE and does not throw an error.
+No matter the amount chosen, the SafeERC20Upgradeable.safeTransferFrom(IERC20Upgradeable(tokenAddress), sender, address(this), amount); call will not revert because it performs a low-level call to NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE, which is an EOA, and the low-level calls to EOAs always succeed.
+Because the safe* version is used, the EOA not returning any data does not revert either.
+
+This allows an attacker to deposit infinite native tokens by not paying anything.
+The contract will emit the same Deposit event as a real depositNative call and the attacker receives the native funds on the other chain.
+
+
+### Recommended Mitigation Steps
+
+Check tokenAddress != NATIVE in depositErc20.
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-03-biconomy-findings/issues/55)
+
+## H015 - WWrong formula when add fee incentivePool can lead to loss of funds
+
+### Vulnerability details
+**Impact**
+
+The getAmountToTransfer function of LiquidityPool updates incentivePool[tokenAddress] by adding some fee to it but the formula is wrong and the value of incentivePool[tokenAddress] will be divided by BASE_DIVISOR (10000000000) each time.
+After just a few time, the value of incentivePool[tokenAddress] will become zero and that amount of tokenAddress token will be locked in contract.
+
+### Proof of Concept
+
+Line 319-322
+
+🚀 @audit:
+```solidity
+ incentivePool[tokenAddress] = (incentivePool[tokenAddress] + (amount * (transferFeePerc - tokenManager.getTokensInfo(tokenAddress).equilibriumFee))) / BASE_DIVISOR;
+```
+
+Let x = incentivePool[tokenAddress], y = amount, z = transferFeePerc and t = tokenManager.getTokensInfo(tokenAddress).equilibriumFee. Then that be written as
+
+
+🚀 @audit:
+```solidity
+ x = (x + (y * (z - t))) / BASE_DIVISOR;
+x = x / BASE_DIVISOR + (y * (z - t)) / BASE_DIVISOR;
+```
+
+### Recommended Mitigation Steps
+
+Fix the bug by change line 319-322 to:
+
+```solidity
+incentivePool[tokenAddress] += (amount * (transferFeePerc - tokenManager.getTokensInfo(tokenAddress).equilibriumFee)) / BASE_DIVISOR;
+```
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-03-biconomy-findings/issues/38)
+
+## H016 - Spend limit on owner can be bypassed
+
+### Vulnerability details
+**Impact**
+
+It seems that the owner is only allowed to spend amount uptil config.spend_limit. However it was observed that this config.spend_limit is never decreased even if owner has spend an amount. This makes config.spend_limit useless as owner can simply send 2-multiple transactions each of config.spend_limit which will all pass and hence bypassing the spend limit placed on owner
+
+### Proof of Concept
+
+  1. Assume spend limit of 100 is placed on owner
+  2. Owner simply calls the spend function at either distributor or community contract with amount 100
+  3. Ideally after this transaction owner should not be allowed to perform any more spend operation
+  4. since config.spend_limit remains unchanged, owner can call step 2 multiple times which will spend amount 100 several times bypassing spend limit
+
+
+### Recommended Mitigation Steps
+
+After successful spend, the config.spend_limit should be decreased by the amount spend
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-03-prepo-findings/issues/54)
+
+## H017 - Reentrancy in MessageProxyForSchain leads to replay attacks
+
+### Vulnerability details
+**Impact**
+
+The postIncomingMessages function calls _callReceiverContract(fromChainHash, messages[i], startingCounter + 1) which gives control to a contract that is potentially attacker controlled before updating the incomingMessageCounter.
+
+```solidity
+for (uint256 i = 0; i < messages.length; i++) {
+    // @audit re-entrant, can submit same postIncomingMessages again
+    _callReceiverContract(fromChainHash, messages[i], startingCounter + 1);
+}
+connectedChains[fromChainHash].incomingMessageCounter += messages.length;
+```
+
+The attacker can re-enter into the postIncomingMessages function and submit the same messages again, creating a replay attack.
+Note that the startingCounter is the way how messages are prevented from replay attacks here, there are no further nonces.
+
+### Proof of Concept
+
+Attacker can submit two cross-chain messages to be executed:
+    1. Transfer 1000 USDC
+    2. A call to their attacker-controlled contract, could be masked as a token contract that allows re-entrance on transfer.
+
+Some node submits the postIncomingMessages(params) transaction, transfers 1000 USDC, then calls the attackers contract, who can themself call postIncomingMessages(params) again, receive 1000 USDC a second time, and stop the recursion.
+
+### Recommended Mitigation Steps
+
+Add a messageInProgressLocker modifier to postIncomingMessages as was done in MessageProxyForMainnet.
+
+### Background Information
+
+- [Chemical - w2](https://github.com/code-423n4/2022-02-skale-findings/issues/24)
